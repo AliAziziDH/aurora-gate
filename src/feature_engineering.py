@@ -88,8 +88,12 @@ def engineer_features(df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
     features["day_of_month"] = dates.dt.day.fillna(0).astype(int)
 
     features["has_state_code"] = descriptions.str.upper().str.contains(STATE_PATTERN, regex=True).astype(int)
-    features["transaction_gap"] = transaction_ids.diff().fillna(0)
-    features["transaction_number_in_day"] = features.groupby(dates.dt.normalize(), dropna=False).cumcount() + 1
+    features["time_since_last_transaction"] = transaction_ids.diff().fillna(0)
+    features["transaction_count_per_day"] = (
+        features.groupby(dates.dt.normalize(), dropna=False).cumcount() + 1
+    )
+    features["transaction_gap"] = features["time_since_last_transaction"]
+    features["transaction_number_in_day"] = features["transaction_count_per_day"]
 
     features["description_word_count"] = descriptions.str.split().str.len().astype(int)
     features["description_char_count"] = descriptions.str.len().astype(int)

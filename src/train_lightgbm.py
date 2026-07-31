@@ -1,7 +1,6 @@
 """Train a LightGBM model and evaluate a CatBoost-LightGBM ensemble."""
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -14,7 +13,7 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.config import EXPERIMENTS_DIR, MODELS_DIR, RANDOM_STATE, TARGET_COLUMN
-from src.data_loader import DataLoader, logger as data_loader_logger
+from src.data_loader import DataLoader
 from src.feature_engineering import engineer_features
 from src.train_model import (
     MODEL_PATH as CATBOOST_MODEL_PATH,
@@ -26,10 +25,10 @@ from src.train_model import (
     _prepare_text,
     _transform_text_features,
 )
+from src.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(data_loader_logger.level)
+logger = get_logger(__name__)
 
 LIGHTGBM_MODEL_PATH = Path(MODELS_DIR) / "lightgbm_model.pkl"
 THRESHOLDS_PATH = Path(MODELS_DIR) / "thresholds.json"

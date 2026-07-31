@@ -34,4 +34,22 @@ experiments/
 .idea/
 *.swp
 .DS_Store
+
+# Data & Cache
+data/
+cache/
+*.csv
+*.parquet
+
+# Models & Artifacts
+models/
+*.pkl
+*.cbm
+*.lgbm
+*.json
+
+# Environments
+venv/
+env/
+**pycache**/
 EOF

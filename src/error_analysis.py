@@ -1,7 +1,6 @@
 """Validation-fold error analysis for the AuroraGate classifier."""
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -24,7 +23,7 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, f1_score, precision_recall_fscore_support
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.data_loader import DataLoader, logger as data_loader_logger
+from src.data_loader import DataLoader
 from src.feature_engineering import engineer_features
 from src.train_model import (
     MODEL_PATH,
@@ -37,10 +36,10 @@ from src.train_model import (
     _transform_text_features,
     _class_weights,
 )
+from src.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(data_loader_logger.level)
+logger = get_logger(__name__)
 sns.set_theme(style="whitegrid")
 
 

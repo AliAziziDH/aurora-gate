@@ -23,7 +23,6 @@ Usage:
 
 import hashlib
 import json
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,10 +34,6 @@ try:
     from charset_normalizer import from_path
 except ImportError:
     from_path = None
-    logging.warning(
-        "charset_normalizer not installed. Encoding detection will be limited. "
-        "Install with: pip install charset-normalizer"
-    )
 
 from src.config import (
     CACHE_DIR,
@@ -49,10 +44,14 @@ from src.config import (
     TARGET_CATEGORIES,
     TARGET_COLUMN,
 )
+from src.logger import get_logger
 
-# Configure logging
-logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+if from_path is None:
+    logger.warning(
+        "charset_normalizer not installed. Encoding detection will be limited. "
+        "Install with: pip install charset-normalizer"
+    )
 
 
 class DataLoader:
@@ -147,6 +146,7 @@ class DataLoader:
             try:
                 logger.info(f"Loading from cache: {cache_file}")
                 df = pd.read_parquet(cache_file)
+                df = self._downcast_columns(df)
                 self._log_loading_summary(df, str(source_file))
                 return df
             except ImportError:
@@ -158,6 +158,7 @@ class DataLoader:
         df = self._validate_data(df, is_train=True)
         df = self._parse_dates(df)
         df = self._clean_text_columns(df)
+        df = self._downcast_columns(df)
         
         # Save to cache
         if self.use_cache:
@@ -198,6 +199,7 @@ class DataLoader:
             try:
                 logger.info(f"Loading from cache: {cache_file}")
                 df = pd.read_parquet(cache_file)
+                df = self._downcast_columns(df)
                 self._log_loading_summary(df, str(source_file))
                 return df
             except ImportError:
@@ -209,6 +211,7 @@ class DataLoader:
         df = self._validate_data(df, is_train=False)
         df = self._parse_dates(df)
         df = self._clean_text_columns(df)
+        df = self._downcast_columns(df)
         
         # Save to cache
         if self.use_cache:
@@ -310,6 +313,20 @@ class DataLoader:
         
         return stats
     
+    @staticmethod
+    def _downcast_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Reduce common numeric and categorical columns after loading."""
+        result = df.copy()
+        if "amount" in result.columns:
+            result["amount"] = pd.to_numeric(result["amount"], downcast="float")
+        if "transaction_id" in result.columns:
+            result["transaction_id"] = pd.to_numeric(
+                result["transaction_id"], downcast="integer"
+            )
+        if "day_of_week" in result.columns:
+            result["day_of_week"] = result["day_of_week"].astype("category")
+        return result
+
     def align_columns(
         self,
         train_df: pd.DataFrame,

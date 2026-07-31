@@ -38,10 +38,10 @@ TARGET_CATEGORIES = [
     "Entertainment",
     "Shopping",
     "Bills & Utilities",
-    "Health & Wellness",
+    "Health & Fitness",
+    "Miscellaneous",
+    "Subscriptions",
     "Travel",
-    "Education",
-    "Other",
 ]
 
 # =============================================================================

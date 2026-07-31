@@ -1,7 +1,6 @@
 """Exploratory data analysis for the AuroraGate expense categorization data."""
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -22,11 +21,11 @@ import pandas as pd
 import seaborn as sns
 from sklearn.feature_extraction.text import CountVectorizer
 
-from src.data_loader import DataLoader, logger as data_loader_logger
+from src.data_loader import DataLoader
+from src.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(data_loader_logger.level)
+logger = get_logger(__name__)
 sns.set_theme(style="whitegrid", context="notebook")
 
 

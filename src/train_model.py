@@ -1,7 +1,6 @@
 """Train and evaluate an AuroraGate CatBoost transaction classifier."""
 
 import json
-import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -23,12 +22,12 @@ from src.config import (
     RANDOM_STATE,
     TARGET_COLUMN,
 )
-from src.data_loader import DataLoader, logger as data_loader_logger
+from src.data_loader import DataLoader
 from src.feature_engineering import categorical_feature_names, engineer_features
+from src.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(data_loader_logger.level)
+logger = get_logger(__name__)
 
 MODEL_PATH = Path(MODELS_DIR) / "catboost_model.pkl"
 THRESHOLDS_PATH = Path(MODELS_DIR) / "thresholds.json"
@@ -76,7 +75,7 @@ def _transform_text_features(
 def _model_frame(df: pd.DataFrame, text_features: np.ndarray) -> Tuple[pd.DataFrame, List[str]]:
     """Create CatBoost's numeric and categorical feature frame."""
     categorical = [column for column in categorical_feature_names() if column in df.columns]
-    excluded = {"date", "description", TARGET_COLUMN}
+    excluded = {"date", "description", "transaction_id", TARGET_COLUMN}
     numeric_columns = [
         column for column in df.columns
         if column not in excluded and column not in categorical
@@ -127,13 +126,19 @@ def _fit_fold_model(
     """Fit one time-series fold and return validation predictions and labels."""
     model = _build_model(class_weights)
     categorical_indices = [train_x.columns.get_loc(column) for column in categorical]
-    model.fit(
-        train_x,
-        train_y,
-        cat_features=categorical_indices,
-        eval_set=(valid_x, valid_y),
-        use_best_model=False,
-    )
+    try:
+        model.fit(
+            train_x,
+            train_y,
+            cat_features=categorical_indices,
+            eval_set=(valid_x, valid_y),
+            use_best_model=False,
+        )
+    except Exception as error:
+        logger.error("Training failed: %s", error)
+        logger.info("Falling back to default parameters...")
+        model = _build_model(class_weights)
+        model.fit(train_x, train_y, cat_features=categorical_indices)
     return model.predict_proba(valid_x), valid_y.to_numpy()
 
 
@@ -211,7 +216,13 @@ def train_model() -> Dict[str, object]:
 
     final_model = _build_model(weights)
     categorical_indices = [model_frame.columns.get_loc(column) for column in categorical]
-    final_model.fit(model_frame, target, cat_features=categorical_indices)
+    try:
+        final_model.fit(model_frame, target, cat_features=categorical_indices)
+    except Exception as error:
+        logger.error("Training failed: %s", error)
+        logger.info("Falling back to default parameters...")
+        final_model = _build_model(weights)
+        final_model.fit(model_frame, target, cat_features=categorical_indices)
 
     joblib.dump(final_model, MODEL_PATH)
     joblib.dump(

@@ -1,7 +1,6 @@
 """Optuna hyperparameter tuning for the AuroraGate model ensemble."""
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -14,7 +13,7 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.config import EXPERIMENTS_DIR, MODELS_DIR, RANDOM_STATE, TARGET_COLUMN
-from src.data_loader import DataLoader, logger as data_loader_logger
+from src.data_loader import DataLoader
 from src.feature_engineering import engineer_features
 from src.train_lightgbm import (
     _apply_thresholds,
@@ -28,10 +27,10 @@ from src.train_model import (
     _prepare_text,
     _transform_text_features,
 )
+from src.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(data_loader_logger.level)
+logger = get_logger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 N_TRIALS = 25
