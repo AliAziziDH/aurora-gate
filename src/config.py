@@ -80,8 +80,8 @@ CATBOOST_PARAMS = {
     "iterations": 500,
     "learning_rate": 0.1,
     "depth": 6,
-    "random_seed": RANDOM_STATE,
-    "verbose": 100,
+    "random_seed": 42,
+    "verbose": False,
 }
 
 LIGHTGBM_PARAMS = {

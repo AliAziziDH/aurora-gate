@@ -1,55 +1,43 @@
-cat > .gitignore << EOF
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-
-# Virtual Environment
-.venv/
-venv/
-ENV/
-env/
-
-# Data files (too large for git)
-data/
-*.csv
-*.pkl
-*.joblib
-*.db
-
-# Model files
-models/
-submissions/
-experiments/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Data & Cache
+# Data
 data/
 cache/
 *.csv
 *.parquet
 
-# Models & Artifacts
+# Models and artifacts
 models/
 *.pkl
+*.joblib
 *.cbm
 *.lgbm
-*.json
+*.db
 
-# Environments
+# Submissions and experiments
+submissions/
+experiments/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
 venv/
 env/
-**pycache**/
-EOF
+ENV/
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# CatBoost temporary files
+catboost_info/

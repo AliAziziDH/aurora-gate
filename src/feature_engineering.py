@@ -1,7 +1,7 @@
 """Feature engineering utilities for AuroraGate transaction data."""
 
 import re
-from typing import Iterable
+from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -52,7 +52,107 @@ def _days_to_weekend(day_number: int) -> int:
     return int(max(0, 5 - day_number))
 
 
-def engineer_features(df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
+def add_recurring_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add store-frequency and repeated-amount indicators."""
+    features = df.copy()
+    if "store_name" not in features.columns:
+        descriptions = features["description"].fillna("").astype(str)
+        features["store_name"] = descriptions.map(_extract_store_name).astype(str)
+
+    store_counts = features.groupby("store_name")["transaction_id"].transform("count")
+    features["store_frequency"] = store_counts.fillna(0).astype("int32")
+
+    amount_store_pair = (
+        features["store_name"].astype(str)
+        + "_"
+        + pd.to_numeric(features["amount"], errors="coerce").round(8).astype(str)
+    )
+    pair_counts = amount_store_pair.groupby(amount_store_pair).transform("count")
+    features["is_recurring"] = pair_counts.gt(1).astype("int8")
+    return features
+
+
+def fit_target_encoding_stats(
+    df: pd.DataFrame, target_col: str = "category"
+) -> Dict[str, Any]:
+    """Fit leakage-safe store target-encoding statistics from training data."""
+    if target_col not in df.columns:
+        raise ValueError(f"Target column is required to fit encoding: {target_col}")
+    store_names = (
+        df["store_name"].astype(str)
+        if "store_name" in df.columns
+        else df["description"].fillna("").astype(str).map(_extract_store_name)
+    )
+    values = pd.Categorical(df[target_col])
+    encoded_target = pd.Series(values.codes, index=df.index, dtype="float64")
+    working = pd.DataFrame(
+        {
+            "store_name": store_names,
+            "encoded_target": encoded_target,
+        },
+        index=df.index,
+    )
+    return {
+        "store_means": working.groupby("store_name")["encoded_target"].mean().to_dict(),
+        "global_mean": float(encoded_target[encoded_target.ge(0)].mean()),
+    }
+
+
+def add_target_encoding(
+    df: pd.DataFrame,
+    target_col: str = "category",
+    k_fold: int = 5,
+    random_state: int = 42,
+    target_encoding_stats: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    """Add smoothed, K-fold store target encoding without validation leakage."""
+    del random_state
+    features = df.copy()
+    if "store_name" not in features.columns:
+        descriptions = features["description"].fillna("").astype(str)
+        features["store_name"] = descriptions.map(_extract_store_name).astype(str)
+
+    if target_col in features.columns:
+        target_codes = pd.Series(
+            pd.Categorical(features[target_col]).codes,
+            index=features.index,
+            dtype="float64",
+        )
+        valid_codes = target_codes.ge(0)
+        global_mean = float(target_codes[valid_codes].mean())
+        encoded = pd.Series(global_mean, index=features.index, dtype="float64")
+        fold_count = min(k_fold, len(features))
+        if fold_count >= 2:
+            from sklearn.model_selection import KFold
+
+            splitter = KFold(n_splits=fold_count, shuffle=True, random_state=42)
+            for train_indices, valid_indices in splitter.split(features):
+                train_rows = features.iloc[train_indices].copy()
+                train_rows["_encoded_target"] = target_codes.iloc[train_indices].to_numpy()
+                means = train_rows.groupby("store_name")["_encoded_target"].mean()
+                encoded.iloc[valid_indices] = (
+                    features.iloc[valid_indices]["store_name"]
+                    .map(means)
+                    .fillna(global_mean)
+                    .to_numpy()
+                )
+        features["store_name_target_enc"] = encoded.astype("float32")
+    elif target_encoding_stats is not None:
+        store_means = target_encoding_stats.get("store_means", {})
+        global_mean = float(target_encoding_stats.get("global_mean", 0.0))
+        features["store_name_target_enc"] = (
+            features["store_name"].map(store_means).fillna(global_mean).astype("float32")
+        )
+    else:
+        features["store_name_target_enc"] = 0.0
+    return features
+
+
+def engineer_features(
+    df: pd.DataFrame,
+    is_train: bool = True,
+    target_encoding_stats: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
     """Add transaction, text, calendar, amount and keyword features.
 
     Args:
@@ -73,6 +173,9 @@ def engineer_features(df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
     transaction_ids = pd.to_numeric(features["transaction_id"], errors="coerce")
 
     features["store_name"] = descriptions.map(_extract_store_name).astype(str)
+    features = add_recurring_features(features)
+    # Target encoding is intentionally disabled until it is revalidated against
+    # the chronological test distribution.
     features["is_round_amount"] = amounts.mod(1).fillna(0).eq(0).astype(int)
     features["decimal_digits"] = amounts.map(_decimal_digits).astype(int)
     features["amount_percentile"] = amounts.groupby(dates.dt.to_period("M"), dropna=False).rank(pct=True)
