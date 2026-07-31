@@ -348,4 +348,6 @@ https://github.com/AliAziziDH/aurora-gate
 
 ## License
 
-No `LICENSE` file is currently included in the repository. Add an explicit license before presenting the project as open source; MIT is a reasonable default if you want others to reuse the code.
+This project is open-source and available under the [MIT License](https://opensource.org/licenses/MIT).
+
+*Built with ❤️, rigorous validation, and a lot of trial and error.*
