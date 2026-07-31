@@ -1,0 +1,37 @@
+cat > .gitignore << EOF
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Data files (too large for git)
+data/
+*.csv
+*.pkl
+*.joblib
+*.db
+
+# Model files
+models/
+submissions/
+experiments/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+EOF
