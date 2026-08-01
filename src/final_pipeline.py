@@ -15,7 +15,7 @@ from sklearn.metrics import f1_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.config import EXPERIMENTS_DIR, MODELS_DIR, SUBMISSIONS_DIR, TARGET_COLUMN
+from src.config import EXPERIMENTS_DIR, MODELS_DIR, SUBMISSIONS_DIR, TARGET_COLUMN, RANDOM_STATE
 from src.data_loader import DataLoader
 from src.feature_engineering import engineer_features
 from src.logger import get_logger
@@ -32,11 +32,11 @@ from src.train_model import (
     MODEL_PATH as CATBOOST_MODEL_PATH,
     VECTORIZER_PATH,
     _build_model,
-    _class_weights,
     _model_frame,
     _prepare_text,
     _transform_text_features,
 )
+from src.training_utils import compute_class_weights
 
 
 logger = get_logger(__name__)
@@ -257,8 +257,7 @@ def train_logistic_regression(
         max_iter=1000,
         C=0.1,
         class_weight="balanced",
-        from src.config import RANDOM_STATE
-    random_state=RANDOM_STATE,
+        random_state=RANDOM_STATE,
     )
     model.fit(text_features, labels)
     return model
@@ -485,7 +484,7 @@ def _fit_full_models(
     """Train and persist models when existing artifacts use an older schema."""
     labels = engineered[TARGET_COLUMN].astype(str).to_numpy()
     encoded = np.array([np.where(classes == label)[0][0] for label in labels])
-    weights = _class_weights(pd.Series(labels))
+    weights = compute_class_weights(pd.Series(labels))
     cat_indices = [cat_frame.columns.get_loc(column) for column in categorical]
     cat_model = _build_model(weights)
     try:
@@ -541,7 +540,7 @@ def _validation_predictions(
     labels = engineered[TARGET_COLUMN].astype(str).to_numpy()
     classes = np.array(sorted(np.unique(labels)))
     encoded = np.array([np.where(classes == label)[0][0] for label in labels])
-    weights = _class_weights(pd.Series(labels))
+    weights = compute_class_weights(pd.Series(labels))
     cat_indices = [cat_frame.columns.get_loc(column) for column in categorical]
     splitter = TimeSeriesSplit(n_splits=5)
     actual_parts, cat_parts, lr_parts, frame_parts = [], [], [], []

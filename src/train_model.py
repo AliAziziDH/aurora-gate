@@ -39,6 +39,7 @@ from src.training_utils import (
 logger = get_logger(__name__)
 
 MODEL_NAME = "catboost"
+MODEL_PATH = Path(MODELS_DIR) / f"{MODEL_NAME}_model.pkl"
 THRESHOLDS_PATH = Path(MODELS_DIR) / "thresholds.json"
 VECTORIZER_PATH = Path(MODELS_DIR) / "tfidf_vectorizer.pkl"
 

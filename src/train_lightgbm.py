@@ -20,11 +20,11 @@ from src.train_model import (
     VECTORIZER_PATH,
     _fit_text_features,
     _build_model,
-    _class_weights,
     _model_frame,
     _prepare_text,
     _transform_text_features,
 )
+from src.training_utils import compute_class_weights
 from src.logger import get_logger
 from src.training_utils import (
     run_cv_training,
@@ -159,7 +159,7 @@ def train_lightgbm() -> Dict[str, Any]:
     labels = engineered[TARGET_COLUMN].astype(str).to_numpy()
     classes = np.array(sorted(np.unique(labels)))
     encoded_labels = np.array([np.where(classes == label)[0][0] for label in labels])
-    catboost_weights = _class_weights(pd.Series(labels))
+    catboost_weights = compute_class_weights(pd.Series(labels))
     
     # Train LightGBM using CV utilities
     lgb_builder = _build_lightgbm_builder()
