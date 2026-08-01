@@ -852,5 +852,72 @@ def run_final_pipeline() -> Dict[str, Any]:
     return result
 
 
+def apply_error_correction_rules(
+    df: pd.DataFrame, 
+    predictions: np.ndarray, 
+    probabilities: np.ndarray,
+    confidence_threshold: float = 0.7
+) -> np.ndarray:
+    """
+    Apply domain-specific rules to fix common misclassifications.
+    Based on error analysis insights.
+    
+    Args:
+        df: DataFrame with transaction data
+        predictions: Current predictions from model
+        probabilities: Prediction probabilities from model
+        confidence_threshold: Only apply rules when model confidence is below this threshold
+        
+    Returns:
+        Corrected predictions
+    """
+    corrected = predictions.copy()
+    
+    for i, (desc, amount) in enumerate(zip(df['description'], df['amount'])):
+        desc_upper = str(desc).upper()
+        current_pred = corrected[i]
+        
+        # Only apply rules when model is unsure (confidence < threshold)
+        max_confidence = np.max(probabilities[i])
+        if max_confidence >= confidence_threshold:
+            continue
+            
+        # Rule 1: IRS/TAX → Bills & Utilities (seen in error analysis)
+        if 'IRS' in desc_upper or 'TAX' in desc_upper:
+            corrected[i] = 'Bills & Utilities'
+            continue
+            
+        # Rule 2: UBER/LYFT → Transportation (specific merchants)
+        if 'UBER' in desc_upper or 'LYFT' in desc_upper:
+            corrected[i] = 'Transportation'
+            continue
+            
+        # Rule 3: Subscription keywords → Subscriptions
+        subscription_keywords = ['NETFLIX', 'SPOTIFY', 'AMAZON PRIME', 'HULU', 'DISNEY', 'HBOMAX']
+        if any(kw in desc_upper for kw in subscription_keywords):
+            corrected[i] = 'Subscriptions'
+            continue
+            
+        # Rule 4: Entertainment keywords → Entertainment
+        entertainment_keywords = ['CINEMA', 'MOVIE', 'CONCERT', 'THEATER', 'BOWLING', 'AMUSEMENT']
+        if any(kw in desc_upper for kw in entertainment_keywords):
+            corrected[i] = 'Entertainment'
+            continue
+            
+        # Rule 5: CVS → Health & Fitness (specific merchant)
+        if 'CVS' in desc_upper:
+            corrected[i] = 'Health & Fitness'
+            continue
+            
+        # Rule 6: Common subscription amounts with subscription keywords
+        if amount in [9.99, 12.99, 14.99, 19.99]:
+            subscription_keywords = ['SUBSCRIPTION', 'MEMBERSHIP', 'RECURRING']
+            if any(kw in desc_upper for kw in subscription_keywords):
+                corrected[i] = 'Subscriptions'
+                continue
+    
+    return corrected
+
+
 if __name__ == "__main__":
     run_final_pipeline()

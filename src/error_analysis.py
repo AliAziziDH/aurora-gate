@@ -34,8 +34,8 @@ from src.train_model import (
     _model_frame,
     _prepare_text,
     _transform_text_features,
-    _class_weights,
 )
+from src.training_utils import compute_class_weights
 from src.logger import get_logger
 
 
@@ -95,7 +95,7 @@ def _fold_predictions(
     model_frame, categorical = _model_frame(engineered, text_features)
     labels = engineered[TARGET_COLUMN].astype(str).to_numpy()
     classes = np.array(sorted(np.unique(labels)))
-    class_weights = _class_weights(pd.Series(labels))
+    class_weights = compute_class_weights(pd.Series(labels))
     splitter = TimeSeriesSplit(n_splits=5)
     validation_rows = []
     fold_summaries = []
