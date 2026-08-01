@@ -26,6 +26,11 @@ from src.train_model import (
     _transform_text_features,
 )
 from src.logger import get_logger
+from src.training_utils import (
+    run_cv_training,
+    save_model_artifacts,
+    save_training_summary,
+)
 
 
 logger = get_logger(__name__)
@@ -71,7 +76,13 @@ def _numeric_frame(frame: pd.DataFrame, categorical: List[str]) -> pd.DataFrame:
     """Encode categorical columns numerically for LightGBM."""
     result = frame.copy()
     for column in categorical:
-        result[column] = result[column].fillna("unknown").astype("category").cat.codes.astype("int32")
+        result[column] = (
+        result[column]
+        .fillna("unknown")
+        .astype("category")
+        .cat.codes
+        .astype("int32")
+    )
     return result.astype(float)
 
 
@@ -114,33 +125,17 @@ def _apply_thresholds(
     return classes[np.argmax(adjusted, axis=1)]
 
 
-def _fit_fold(
-    train_x: pd.DataFrame,
-    train_y: np.ndarray,
-    valid_x: pd.DataFrame,
-    valid_y: np.ndarray,
-) -> Tuple[lgb.LGBMClassifier, np.ndarray]:
-    """Fit LightGBM on one chronological fold and return validation probabilities."""
-    model = _build_lightgbm()
-    model.fit(
-        train_x,
-        train_y,
-        eval_X=[valid_x.to_numpy()],
-        eval_y=valid_y,
-        callbacks=[lgb.early_stopping(50, verbose=False)],
-    )
-    return model, model.predict_proba(valid_x)
+def _build_lightgbm_builder():
+    """Create a model builder function for LightGBM."""
+    def model_builder():
+        """Build and return a LightGBM classifier."""
+        return _build_lightgbm()
+    return model_builder
 
 
 def train_lightgbm() -> Dict[str, Any]:
     """Train LightGBM, evaluate folds, save artifacts, and report ensemble gains."""
-    for directory in (Path(MODELS_DIR), Path(EXPERIMENTS_DIR)):
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            logger.error("Unable to create output directory %s: %s", directory, error)
-            raise
-
+    # Load data and prepare features
     if not CATBOOST_MODEL_PATH.is_file():
         raise FileNotFoundError(
             f"Missing {CATBOOST_MODEL_PATH}; run `python -m src.train_model` first."
@@ -165,20 +160,35 @@ def train_lightgbm() -> Dict[str, Any]:
     classes = np.array(sorted(np.unique(labels)))
     encoded_labels = np.array([np.where(classes == label)[0][0] for label in labels])
     catboost_weights = _class_weights(pd.Series(labels))
+    
+    # Train LightGBM using CV utilities
+    lgb_builder = _build_lightgbm_builder()
+    lgb_fit_params = {
+        "eval_set": None,  # Will be set by run_cv_training
+        "callbacks": [lgb.early_stopping(50, verbose=False)],
+    }
+    
+    lgb_fold_scores, lgb_oof_preds, lgb_oof_probas = run_cv_training(
+        model_builder=lgb_builder,
+        train_data=lgb_frame,
+        target=pd.Series(encoded_labels),
+        fit_params=lgb_fit_params,
+        eval_metric="macro_f1",
+    )
+    
+    # Reorder LightGBM probabilities to match classes
+    lgb_oof_probas = _ordered_probabilities(lgb_oof_probas, classes, classes)
+    
+    # Train CatBoost models and evaluate ensemble
     splitter = TimeSeriesSplit(n_splits=5)
     fold_results = []
-    all_lgb_probabilities = []
     all_cat_probabilities = []
-    all_labels = []
-
+    
     for fold, (train_indices, valid_indices) in enumerate(splitter.split(lgb_frame), start=1):
-        _, lgb_probabilities = _fit_fold(
-            lgb_frame.iloc[train_indices],
-            encoded_labels[train_indices],
-            lgb_frame.iloc[valid_indices],
-            encoded_labels[valid_indices],
-        )
-        lgb_probabilities = _ordered_probabilities(lgb_probabilities, classes, classes)
+        # Get LightGBM probabilities for this fold
+        lgb_probabilities = lgb_oof_probas[valid_indices]
+        
+        # Train and evaluate CatBoost for this fold
         fold_catboost = _build_model(catboost_weights)
         categorical_indices = [cat_frame.columns.get_loc(column) for column in categorical]
         fold_catboost.fit(
@@ -193,55 +203,62 @@ def train_lightgbm() -> Dict[str, Any]:
             np.asarray(fold_catboost.classes_),
             classes,
         )
+        
+        # Evaluate all approaches
         fold_labels = labels[valid_indices]
         lgb_predictions = _apply_thresholds(lgb_probabilities, classes, thresholds)
         cat_predictions = _apply_thresholds(cat_probabilities, classes, thresholds)
         ensemble_probabilities = (lgb_probabilities + cat_probabilities) / 2.0
         ensemble_predictions = _apply_thresholds(ensemble_probabilities, classes, thresholds)
+        
         lgb_score = f1_score(fold_labels, lgb_predictions, average="macro", zero_division=0)
         cat_score = f1_score(fold_labels, cat_predictions, average="macro", zero_division=0)
-        ensemble_score = f1_score(fold_labels, ensemble_predictions, average="macro", zero_division=0)
-        fold_results.append(
-            {
-                "fold": fold,
-                "lightgbm_macro_f1": float(lgb_score),
-                "catboost_macro_f1": float(cat_score),
-                "ensemble_macro_f1": float(ensemble_score),
-                "ensemble_improvement_over_catboost": float(ensemble_score - cat_score),
-            }
+        ensemble_score = f1_score(
+            fold_labels, ensemble_predictions, 
+            average="macro", zero_division=0
         )
+        
+        fold_results.append({
+            "fold": fold,
+            "lightgbm_macro_f1": float(lgb_score),
+            "catboost_macro_f1": float(cat_score),
+            "ensemble_macro_f1": float(ensemble_score),
+            "ensemble_improvement_over_catboost": float(ensemble_score - cat_score),
+        })
+        
         logger.info(
             "Fold %d: LightGBM F1=%.4f, CatBoost F1=%.4f, Ensemble F1=%.4f",
-            fold,
-            lgb_score,
-            cat_score,
-            ensemble_score,
+            fold, lgb_score, cat_score, ensemble_score
         )
-        all_lgb_probabilities.append(lgb_probabilities)
         all_cat_probabilities.append(cat_probabilities)
-        all_labels.append(fold_labels)
 
+    # Train final LightGBM model
     final_lightgbm = _build_lightgbm()
     final_lightgbm.fit(lgb_frame, encoded_labels)
-    joblib.dump(final_lightgbm, LIGHTGBM_MODEL_PATH)
-    joblib.dump(
-        {
+    
+    # Save LightGBM artifacts
+    save_model_artifacts(
+        model=final_lightgbm,
+        artifacts={
             "feature_columns": lgb_frame.columns.tolist(),
             "categorical_columns": categorical,
             "classes": classes.tolist(),
         },
-        LIGHTGBM_MODEL_PATH.with_name("lightgbm_metadata.pkl"),
+        model_name="lightgbm",
     )
+    
+    # Save ensemble weights
     ensemble_weights = {"catboost": 0.5, "lightgbm": 0.5}
     with ENSEMBLE_WEIGHTS_PATH.open("w", encoding="utf-8") as weights_file:
         json.dump(ensemble_weights, weights_file, indent=2)
 
-    lgb_validation = np.vstack(all_lgb_probabilities)
+    # Calculate overall metrics
     cat_validation = np.vstack(all_cat_probabilities)
-    validation_labels = np.concatenate(all_labels)
+    validation_labels = labels  # Using all labels since we're using OOF predictions
+    
     lgb_overall = f1_score(
         validation_labels,
-        _apply_thresholds(lgb_validation, classes, thresholds),
+        _apply_thresholds(lgb_oof_probas, classes, thresholds),
         average="macro",
         zero_division=0,
     )
@@ -253,10 +270,12 @@ def train_lightgbm() -> Dict[str, Any]:
     )
     ensemble_overall = f1_score(
         validation_labels,
-        _apply_thresholds((lgb_validation + cat_validation) / 2.0, classes, thresholds),
+        _apply_thresholds((lgb_oof_probas + cat_validation) / 2.0, classes, thresholds),
         average="macro",
         zero_division=0,
     )
+    
+    # Prepare summary
     summary = {
         "fold_results": fold_results,
         "overall_lightgbm_macro_f1": float(lgb_overall),
@@ -268,8 +287,9 @@ def train_lightgbm() -> Dict[str, Any]:
         "model_path": str(LIGHTGBM_MODEL_PATH),
         "ensemble_weights_path": str(ENSEMBLE_WEIGHTS_PATH),
     }
-    with ENSEMBLE_SUMMARY_PATH.open("w", encoding="utf-8") as summary_file:
-        json.dump(summary, summary_file, indent=2)
+    
+    # Save summary
+    save_training_summary(summary, "ensemble_summary")
 
     print("=" * 70)
     print("AuroraGate LightGBM and Ensemble Training")

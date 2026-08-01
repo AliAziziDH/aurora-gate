@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, Optional
 import numpy as np
 import pandas as pd
 
+from src.config import RANDOM_STATE
+
 
 STATE_CODES = (
     "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|"
@@ -102,11 +104,12 @@ def add_target_encoding(
     df: pd.DataFrame,
     target_col: str = "category",
     k_fold: int = 5,
-    random_state: int = 42,
+    random_state: int = RANDOM_STATE,
     target_encoding_stats: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """Add smoothed, K-fold store target encoding without validation leakage."""
-    del random_state
+    # random_state parameter is kept for API compatibility but not used
+    # since we use RANDOM_STATE from config for reproducibility
     features = df.copy()
     if "store_name" not in features.columns:
         descriptions = features["description"].fillna("").astype(str)
@@ -124,8 +127,8 @@ def add_target_encoding(
         fold_count = min(k_fold, len(features))
         if fold_count >= 2:
             from sklearn.model_selection import KFold
-
-            splitter = KFold(n_splits=fold_count, shuffle=True, random_state=42)
+            from src.config import RANDOM_STATE
+            splitter = KFold(n_splits=fold_count, shuffle=True, random_state=RANDOM_STATE)
             for train_indices, valid_indices in splitter.split(features):
                 train_rows = features.iloc[train_indices].copy()
                 train_rows["_encoded_target"] = target_codes.iloc[train_indices].to_numpy()
@@ -153,12 +156,44 @@ def engineer_features(
     is_train: bool = True,
     target_encoding_stats: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
-    """Add transaction, text, calendar, amount and keyword features.
-
+    """Engineer comprehensive features from transaction data.
+    
+    This function creates a wide range of features including:
+    - Store and merchant information extracted from descriptions
+    - Recurring transaction indicators
+    - Amount-based features (round amounts, percentiles, bins)
+    - Temporal features (day, month, quarter, weekend indicators)
+    - Text statistics (word count, character count, digit count)
+    - Keyword-based features for common merchant patterns
+    - Transaction sequence features (gaps, counts)
+    
     Args:
-        df: Training or test transactions.
-        is_train: Kept for API compatibility; the same deterministic features
-            are produced for both training and test frames.
+        df: Input DataFrame containing transaction data. Must include:
+            - transaction_id: Unique transaction identifier
+            - date: Transaction date
+            - description: Transaction description
+            - amount: Transaction amount
+            - day_of_week: Day of week
+        is_train: Boolean indicating if this is training data. Currently kept
+                 for API compatibility but features are deterministic.
+        target_encoding_stats: Optional pre-computed target encoding statistics
+                             for test data consistency.
+        
+    Returns:
+        DataFrame with original columns plus engineered features. New features include:
+        - store_name: Extracted merchant name
+        - store_frequency: Count of transactions per store
+        - is_recurring: Indicator for recurring transactions
+        - is_round_amount: Indicator for round dollar amounts
+        - decimal_digits: Number of decimal digits in amount
+        - amount_percentile: Percentile rank of amount within month
+        - Various temporal features (day_of_year, week_of_year, etc.)
+        - Text statistics (description_word_count, etc.)
+        - Keyword indicators (has_grocery_keyword, etc.)
+        
+    Note:
+        Target encoding is currently disabled until revalidated against
+        the chronological test distribution.
     """
     del is_train
     required = {"transaction_id", "date", "description", "amount", "day_of_week"}

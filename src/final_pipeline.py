@@ -146,7 +146,10 @@ def apply_surgical_rules(
         raise ValueError("Probabilities must have one column per target category")
 
     rule_keywords = (
-        ("Subscriptions", ("NETFLIX", "SPOTIFY", "APPLE.COM/BILL", "AMAZON PRIME", "HULU", "DISNEY+", "HBOMAX")),
+        ("Subscriptions", (
+    "NETFLIX", "SPOTIFY", "APPLE.COM/BILL", 
+    "AMAZON PRIME", "HULU", "DISNEY+", "HBOMAX"
+)),
         ("Miscellaneous", ("ZELLE", "VENMO", "PAYPAL", "TRANSFER")),
         ("Transportation", ("UBER", "LYFT", "TAXI")),
         ("Entertainment", ("CINEMA", "MOVIE", "CONCERT", "THEATER")),
@@ -254,7 +257,8 @@ def train_logistic_regression(
         max_iter=1000,
         C=0.1,
         class_weight="balanced",
-        random_state=42,
+        from src.config import RANDOM_STATE
+    random_state=RANDOM_STATE,
     )
     model.fit(text_features, labels)
     return model
@@ -519,7 +523,8 @@ def _load_or_train_models(
     if CATBOOST_MODEL_PATH.is_file() and LIGHTGBM_MODEL_PATH.is_file():
         cat_model = joblib.load(CATBOOST_MODEL_PATH)
         lgb_model = joblib.load(LIGHTGBM_MODEL_PATH)
-        if _model_matches_frame(cat_model, cat_frame) and _model_matches_frame(lgb_model, lgb_frame):
+        if (_model_matches_frame(cat_model, cat_frame) and
+        _model_matches_frame(lgb_model, lgb_frame)):
             return cat_model, lgb_model
         logger.info("Persisted model schema is outdated; retraining with new features")
     return _fit_full_models(engineered, cat_frame, lgb_frame, categorical, classes)
@@ -650,7 +655,11 @@ def run_final_pipeline() -> Dict[str, Any]:
     thresholds = _load_thresholds()
 
     loader = DataLoader(use_cache=False)
-    raw_train = loader.load_train_data(force_reload=True).sort_values("transaction_id").reset_index(drop=True)
+    raw_train = (
+    loader.load_train_data(force_reload=True)
+    .sort_values("transaction_id")
+    .reset_index(drop=True)
+)
     train_engineered_for_text = engineer_features(raw_train, is_train=True)
     text_bundle = _load_text_artifacts(_prepare_text(train_engineered_for_text))
     engineered_train, train_cat, train_lgb, categorical, train_text_features = _prepare_frames(
@@ -742,7 +751,11 @@ def run_final_pipeline() -> Dict[str, Any]:
         raw_train[TARGET_COLUMN].astype(str).to_numpy(),
     )
 
-    raw_test = loader.load_test_data(force_reload=True).sort_values("transaction_id").reset_index(drop=True)
+    raw_test = (
+    loader.load_test_data(force_reload=True)
+    .sort_values("transaction_id")
+    .reset_index(drop=True)
+)
     engineered_test, test_cat, test_lgb, _, test_text_features = _prepare_frames(
         raw_test,
         text_bundle,
@@ -782,7 +795,10 @@ def run_final_pipeline() -> Dict[str, Any]:
     else:
         final_strategy = "weighted_ensemble"
         test_predictions = ensemble_test_predictions
-    submission = pd.DataFrame({"transaction_id": raw_test["transaction_id"], TARGET_COLUMN: test_predictions})
+    submission = pd.DataFrame({
+    "transaction_id": raw_test["transaction_id"],
+    TARGET_COLUMN: test_predictions
+})
     submission.to_csv(SUBMISSION_PATH, index=False)
 
     result = {
