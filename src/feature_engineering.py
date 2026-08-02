@@ -493,12 +493,11 @@ def add_target_encoding(
     df: pd.DataFrame,
     target_col: str = "category",
     k_fold: int = 5,
+    m_smoothing: float = 10.0,
     random_state: int = RANDOM_STATE,
     target_encoding_stats: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
-    """Add smoothed, K-fold store target encoding without validation leakage."""
-    # random_state parameter is kept for API compatibility but not used
-    # since we use RANDOM_STATE from config for reproducibility
+    """Add m-estimate smoothed K-fold store target encoding without validation leakage."""
     features = df.copy()
     if "store_name" not in features.columns:
         descriptions = features["description"].fillna("").astype(str)
@@ -511,20 +510,23 @@ def add_target_encoding(
             dtype="float64",
         )
         valid_codes = target_codes.ge(0)
-        global_mean = float(target_codes[valid_codes].mean())
+        global_mean = float(target_codes[valid_codes].mean()) if valid_codes.any() else 0.0
         encoded = pd.Series(global_mean, index=features.index, dtype="float64")
         fold_count = min(k_fold, len(features))
         if fold_count >= 2:
             from sklearn.model_selection import KFold
-            from src.config import RANDOM_STATE
-            splitter = KFold(n_splits=fold_count, shuffle=True, random_state=RANDOM_STATE)
+            splitter = KFold(n_splits=fold_count, shuffle=True, random_state=random_state)
             for train_indices, valid_indices in splitter.split(features):
                 train_rows = features.iloc[train_indices].copy()
                 train_rows["_encoded_target"] = target_codes.iloc[train_indices].to_numpy()
-                means = train_rows.groupby("store_name")["_encoded_target"].mean()
+                grouped = train_rows.groupby("store_name")["_encoded_target"]
+                counts = grouped.count()
+                means = grouped.mean()
+                # m-estimate smoothing
+                smoothed = (counts * means + m_smoothing * global_mean) / (counts + m_smoothing)
                 encoded.iloc[valid_indices] = (
                     features.iloc[valid_indices]["store_name"]
-                    .map(means)
+                    .map(smoothed)
                     .fillna(global_mean)
                     .to_numpy()
                 )
@@ -621,8 +623,12 @@ def engineer_features(
 
     features["store_name"] = descriptions.apply(_store_extractor).astype(str)
     features = add_recurring_features(features)
-    # Target encoding is intentionally disabled until it is revalidated against
-    # the chronological test distribution.
+    features = add_target_encoding(
+        features,
+        target_col="category",
+        k_fold=5,
+        target_encoding_stats=target_encoding_stats,
+    )
     features["is_round_amount"] = amounts.mod(1).fillna(0).eq(0).astype(int)
     features["decimal_digits"] = amounts.map(_decimal_digits).astype(int)
     features["amount_percentile"] = amounts.groupby(dates.dt.to_period("M"), dropna=False).rank(pct=True)

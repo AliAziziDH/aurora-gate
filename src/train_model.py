@@ -1,4 +1,4 @@
-"""Train and evaluate an AuroraGate CatBoost transaction classifier."""
+"""Train and evaluate an AuroraGate CatBoost transaction classifier using native text_features."""
 
 import json
 from pathlib import Path
@@ -8,14 +8,9 @@ import joblib
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
-from scipy.sparse import hstack
-from sklearn.decomposition import TruncatedSVD
-from sklearn.dummy import DummyClassifier
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from scipy.optimize import minimize
 from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.utils.class_weight import compute_class_weight
 
 from src.config import (
     CATBOOST_PARAMS,
@@ -23,91 +18,58 @@ from src.config import (
     MODELS_DIR,
     RANDOM_STATE,
     TARGET_COLUMN,
-    TFIDF_PARAMS,
 )
 from src.data_loader import DataLoader
 from src.feature_engineering import categorical_feature_names, engineer_features
 from src.logger import get_logger
 from src.training_utils import (
-    run_cv_training,
     compute_class_weights,
     save_model_artifacts,
     save_training_summary,
 )
-
 
 logger = get_logger(__name__)
 
 MODEL_NAME = "catboost"
 MODEL_PATH = Path(MODELS_DIR) / f"{MODEL_NAME}_model.pkl"
 THRESHOLDS_PATH = Path(MODELS_DIR) / "thresholds.json"
-VECTORIZER_PATH = Path(MODELS_DIR) / "tfidf_vectorizer.pkl"
 
 
-def _prepare_text(df: pd.DataFrame) -> pd.Series:
-    """Build a stable text field for both TF-IDF vectorizers."""
-    return (
-        df["description"].fillna("").astype(str)
-        + " "
-        + df["store_name"].fillna("UNKNOWN").astype(str)
-        + " "
-        + df["day_of_week"].fillna("UNKNOWN").astype(str)
-    )
-
-
-def _fit_text_features(text: pd.Series) -> Tuple[object, object, TruncatedSVD, np.ndarray]:
-    """Fit both requested TF-IDF vectorizers and reduce their combination."""
-    from src.config import TFIDF_PARAMS
-    char_vectorizer = TfidfVectorizer(
-        analyzer="char_wb", ngram_range=(3, 5), max_features=TFIDF_PARAMS["max_features"], sublinear_tf=True
-    )
-    word_vectorizer = TfidfVectorizer(
-        analyzer="word", ngram_range=(1, 2), max_features=20000, sublinear_tf=True,
-        min_df=1,
-    )
-    char_matrix = char_vectorizer.fit_transform(text)
-    word_matrix = word_vectorizer.fit_transform(text)
-    combined = hstack([char_matrix, word_matrix], format="csr")
-    components = min(64, max(2, combined.shape[1] - 1), max(2, combined.shape[0] - 1))
-    svd = TruncatedSVD(n_components=components, random_state=RANDOM_STATE)
-    reduced = svd.fit_transform(combined)
-    return char_vectorizer, word_vectorizer, svd, reduced
-
-
-def _transform_text_features(
-    text: pd.Series, char_vectorizer: object, word_vectorizer: object, svd: TruncatedSVD
-) -> np.ndarray:
-    """Transform text with fitted vectorizers and SVD."""
-    char_matrix = char_vectorizer.transform(text)
-    word_matrix = word_vectorizer.transform(text)
-    return svd.transform(hstack([char_matrix, word_matrix], format="csr"))
-
-
-def _model_frame(df: pd.DataFrame, text_features: np.ndarray) -> Tuple[pd.DataFrame, List[str]]:
-    """Create CatBoost's numeric and categorical feature frame."""
-    categorical = [column for column in categorical_feature_names() if column in df.columns]
-    excluded = {"date", "description", "transaction_id", TARGET_COLUMN}
-    numeric_columns = [
-        column for column in df.columns
-        if column not in excluded and column not in categorical
+def _prepare_model_frame(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    """
+    Prepare feature DataFrame for CatBoost using native text_features.
+    
+    Returns:
+        Tuple of (frame, categorical_columns, text_columns)
+    """
+    categorical = [col for col in categorical_feature_names() if col in df.columns]
+    text_columns = ["description"]
+    
+    excluded = {"date", "transaction_id", TARGET_COLUMN}
+    feature_columns = [
+        col for col in df.columns
+        if col not in excluded
     ]
-    frame = df[numeric_columns].copy()
-    for column in categorical:
-        frame[column] = df[column].fillna("unknown").astype(str)
-    text_frame = pd.DataFrame(
-        text_features,
-        index=df.index,
-        columns=[f"tfidf_svd_{index}" for index in range(text_features.shape[1])],
-    )
-    frame = pd.concat([frame.reset_index(drop=True), text_frame.reset_index(drop=True)], axis=1)
-    return frame, categorical
+    
+    frame = df[feature_columns].copy()
+    
+    # Ensure text column is clean string
+    for col in text_columns:
+        frame[col] = frame[col].fillna("").astype(str)
+        
+    # Ensure categorical columns are string
+    for col in categorical:
+        frame[col] = frame[col].fillna("unknown").astype(str)
+        
+    return frame, categorical, text_columns
 
 
-# Using compute_class_weights from training_utils
-
-
-def _build_model(class_weights: Dict[str, float]) -> CatBoostClassifier:
-    """Create a CatBoost classifier using project defaults and class weights."""
+def _build_catboost_model(
+    class_weights: Dict[str, float],
+    text_features: List[str],
+    cat_features: List[str]
+) -> CatBoostClassifier:
+    """Build CatBoost classifier configured for native text features."""
     params = dict(CATBOOST_PARAMS)
     params.update(
         {
@@ -117,177 +79,174 @@ def _build_model(class_weights: Dict[str, float]) -> CatBoostClassifier:
             "random_seed": RANDOM_STATE,
             "verbose": False,
             "allow_writing_files": False,
+            "text_features": text_features,
+            "cat_features": cat_features,
             "od_type": "Iter",
-            "od_wait": 50,  # Early stopping after 50 iterations without improvement
+            "od_wait": 50,
         }
     )
     return CatBoostClassifier(**params)
 
 
-def _build_model_builder(class_weights: Dict[str, float]):
-    """Create a model builder function for use with run_cv_training."""
-    def model_builder():
-        """Build and return a CatBoost classifier."""
-        return _build_model(class_weights)
-    return model_builder
-
-
-def _tune_thresholds(
-    probabilities: np.ndarray, labels: np.ndarray, classes: np.ndarray
-) -> Dict[str, float]:
-    """Tune one-vs-rest class thresholds using a macro-F1 objective."""
-    thresholds = {str(label): 1.0 for label in classes}
-    for class_index, label in enumerate(classes):
-        best_threshold = 1.0
-        best_score = f1_score(labels, classes[np.argmax(probabilities, axis=1)], average="macro")
-        for threshold in np.linspace(0.10, 1.00, 19):
-            adjusted = probabilities.copy()
-            adjusted[:, class_index] = adjusted[:, class_index] / threshold
-            predictions = classes[np.argmax(adjusted, axis=1)]
-            score = f1_score(labels, predictions, average="macro", zero_division=0)
-            if score > best_score:
-                best_score = score
-                best_threshold = float(threshold)
-        thresholds[str(label)] = best_threshold
-    return thresholds
-
-
-def _apply_thresholds(probabilities: np.ndarray, classes: np.ndarray, thresholds: Dict[str, float]) -> np.ndarray:
-    """Convert probabilities into predictions using class thresholds."""
-    adjusted = probabilities.copy()
-    for index, label in enumerate(classes):
-        adjusted[:, index] /= thresholds.get(str(label), 1.0)
-    return classes[np.argmax(adjusted, axis=1)]
-
-
-def _train_baseline_models(
-    model_frame: pd.DataFrame,
-    target: pd.Series,
+def optimize_class_thresholds(
+    y_true: np.ndarray,
+    oof_probabilities: np.ndarray,
     classes: np.ndarray
 ) -> Dict[str, float]:
-    """Train and evaluate baseline models for comparison."""
-    baseline_results = {}
+    """
+    Unified probability threshold optimization directly maximizing Macro F1 on OOF.
     
-    # Dummy classifier (most frequent class)
-    dummy = DummyClassifier(strategy="most_frequent", random_state=RANDOM_STATE)
-    dummy_scores, _, _ = run_cv_training(
-        model_builder=lambda: dummy,
-        train_data=model_frame,
-        target=target,
-        eval_metric="macro_f1"
+    Returns a dictionary mapping class names to probability multiplier weights.
+    """
+    num_classes = len(classes)
+    
+    def objective(multipliers: np.ndarray) -> float:
+        # Scale probabilities by multipliers and take argmax
+        scaled_probas = oof_probabilities * multipliers
+        preds = classes[np.argmax(scaled_probas, axis=1)]
+        score = f1_score(y_true, preds, average="macro", zero_division=0)
+        return -score  # Minimize negative F1
+        
+    initial_multipliers = np.ones(num_classes)
+    bounds = [(0.1, 10.0)] * num_classes
+    
+    res = minimize(
+        objective,
+        x0=initial_multipliers,
+        bounds=bounds,
+        method="Powell",
+        options={"maxiter": 200}
     )
-    baseline_results["dummy_most_frequent"] = float(np.mean(dummy_scores))
-    logger.info("Dummy (most frequent) macro F1: %.4f", baseline_results["dummy_most_frequent"])
     
-    # Logistic Regression baseline
-    try:
-        lr = LogisticRegression(
-            max_iter=1000,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            verbose=0
-        )
-        lr_scores, _, _ = run_cv_training(
-            model_builder=lambda: lr,
-            train_data=model_frame,
-            target=target,
-            eval_metric="macro_f1"
-        )
-        baseline_results["logistic_regression"] = float(np.mean(lr_scores))
-        logger.info("Logistic Regression macro F1: %.4f", baseline_results["logistic_regression"])
-    except Exception as e:
-        logger.warning("Logistic Regression baseline failed: %s", e)
-        baseline_results["logistic_regression"] = 0.0
-    
-    return baseline_results
+    best_multipliers = res.x
+    best_thresholds = {str(cls): float(best_multipliers[i]) for i, cls in enumerate(classes)}
+    return best_thresholds
+
+
+def apply_class_thresholds(
+    probabilities: np.ndarray,
+    classes: np.ndarray,
+    thresholds: Dict[str, float]
+) -> np.ndarray:
+    """Apply probability multipliers and return class predictions."""
+    multipliers = np.array([thresholds.get(str(cls), 1.0) for cls in classes])
+    scaled_probas = probabilities * multipliers
+    return classes[np.argmax(scaled_probas, axis=1)]
 
 
 def train_model() -> Dict[str, object]:
-    """Train the final CatBoost model and save all inference artifacts."""
-    # Load and prepare data
+    """Train CatBoost using native text_features and OOF threshold optimization."""
+    logger.info("Starting CatBoost training pipeline with native text_features...")
+    
+    # 1. Load Data
     loader = DataLoader(use_cache=False)
     raw_train = loader.load_train_data(force_reload=True)
     raw_train = raw_train.sort_values("transaction_id").reset_index(drop=True)
+    
+    # 2. Engineer Features (with smooth K-Fold target encoding enabled)
     engineered = engineer_features(raw_train, is_train=True)
-    text = _prepare_text(engineered)
-    char_vectorizer, word_vectorizer, svd, text_features = _fit_text_features(text)
-    model_frame, categorical = _model_frame(engineered, text_features)
+    model_frame, categorical_cols, text_cols = _prepare_model_frame(engineered)
+    
     target = engineered[TARGET_COLUMN].astype(str)
     classes = np.array(sorted(target.unique()))
-    weights = compute_class_weights(target)
-
-    # Run cross-validated training
-    model_builder = _build_model_builder(weights)
+    class_weights = compute_class_weights(target)
     
-    # Prepare fit parameters for CatBoost
-    categorical_indices = [model_frame.columns.get_loc(column) for column in categorical]
-    fit_params = {
-        "cat_features": categorical_indices,
-        "eval_set": None,  # Will be set by run_cv_training
-        "use_best_model": False,
-        "early_stopping_rounds": 50,
-    }
+    # 3. Cross-Validation
+    splitter = TimeSeriesSplit(n_splits=5)
     
-    fold_scores, oof_predictions, oof_probabilities = run_cv_training(
-        model_builder=model_builder,
-        train_data=model_frame,
-        target=target,
-        fit_params=fit_params,
-        eval_metric="macro_f1",
-    )
-
-    # Tune thresholds
-    thresholds = _tune_thresholds(oof_probabilities, target[oof_predictions.index].to_numpy(), classes)
-    tuned_predictions = _apply_thresholds(oof_probabilities, classes, thresholds)
-    tuned_macro = f1_score(target[oof_predictions.index].to_numpy(), tuned_predictions, average="macro", zero_division=0)
-
-    # Train and evaluate baseline models
-    baseline_results = _train_baseline_models(model_frame, target, classes)
+    oof_indices = []
+    oof_predictions_list = []
+    oof_probabilities_list = []
+    fold_scores = []
     
-    # Train final model on full data
-    final_model = _build_model(weights)
-    try:
-        final_model.fit(model_frame, target, cat_features=categorical_indices)
-    except Exception as error:
-        logger.error("Training failed: %s", error)
-        logger.info("Falling back to default parameters...")
-        final_model = _build_model(weights)
-        final_model.fit(model_frame, target, cat_features=categorical_indices)
-
+    for fold, (train_idx, valid_idx) in enumerate(splitter.split(model_frame), start=1):
+        X_tr, X_val = model_frame.iloc[train_idx], model_frame.iloc[valid_idx]
+        y_tr, y_val = target.iloc[train_idx], target.iloc[valid_idx]
+        
+        model = _build_catboost_model(class_weights, text_cols, categorical_cols)
+        model.fit(
+            X_tr, y_tr,
+            eval_set=(X_val, y_val),
+            use_best_model=True,
+            early_stopping_rounds=50,
+            verbose=False
+        )
+        
+        probas = model.predict_proba(X_val)
+        model_classes = np.array(model.classes_)
+        
+        # Align probabilities to sorted global classes
+        aligned_probas = np.zeros((len(valid_idx), len(classes)))
+        for i, cls in enumerate(model_classes):
+            idx_in_global = np.where(classes == cls)[0][0]
+            aligned_probas[:, idx_in_global] = probas[:, i]
+            
+        preds = classes[np.argmax(aligned_probas, axis=1)]
+        fold_f1 = f1_score(y_val, preds, average="macro", zero_division=0)
+        fold_scores.append(float(fold_f1))
+        
+        logger.info("Fold %d raw CatBoost Macro F1: %.4f", fold, fold_f1)
+        
+        oof_indices.extend(valid_idx)
+        oof_predictions_list.append(preds)
+        oof_probabilities_list.append(aligned_probas)
+        
+    oof_y_true = target.iloc[oof_indices].to_numpy()
+    oof_probabilities = np.vstack(oof_probabilities_list)
+    raw_oof_preds = np.concatenate(oof_predictions_list)
+    
+    raw_oof_macro_f1 = f1_score(oof_y_true, raw_oof_preds, average="macro", zero_division=0)
+    logger.info("Overall Raw OOF Macro F1: %.4f", raw_oof_macro_f1)
+    
+    # 4. Threshold Optimization on OOF
+    logger.info("Optimizing per-class probability thresholds on OOF...")
+    threshold_multipliers = optimize_class_thresholds(oof_y_true, oof_probabilities, classes)
+    
+    tuned_oof_preds = apply_class_thresholds(oof_probabilities, classes, threshold_multipliers)
+    tuned_oof_macro_f1 = f1_score(oof_y_true, tuned_oof_preds, average="macro", zero_division=0)
+    logger.info("Overall Tuned OOF Macro F1: %.4f (Gain: +%.4f)", tuned_oof_macro_f1, tuned_oof_macro_f1 - raw_oof_macro_f1)
+    
+    # 5. Train Final Model on Full Training Dataset
+    logger.info("Training final CatBoost model on complete dataset...")
+    final_model = _build_catboost_model(class_weights, text_cols, categorical_cols)
+    final_model.fit(model_frame, target, verbose=False)
+    
     # Save artifacts
     saved_paths = save_model_artifacts(
         model=final_model,
         artifacts={
-            "char_vectorizer": char_vectorizer,
-            "word_vectorizer": word_vectorizer,
-            "svd": svd,
-            "categorical_columns": categorical,
+            "categorical_columns": categorical_cols,
+            "text_columns": text_cols,
             "feature_columns": model_frame.columns.tolist(),
-            "vectorizer_path": VECTORIZER_PATH,
         },
         model_name=MODEL_NAME,
     )
     
-    with THRESHOLDS_PATH.open("w", encoding="utf-8") as threshold_file:
-        json.dump(thresholds, threshold_file, indent=2)
-
-    # Prepare result
+    with THRESHOLDS_PATH.open("w", encoding="utf-8") as f:
+        json.dump(threshold_multipliers, f, indent=2)
+        
     result = {
-        "fold_scores": [{"fold": i+1, "macro_f1": score} for i, score in enumerate(fold_scores)],
-        "tuned_validation_macro_f1": float(tuned_macro),
-        "baseline_models": baseline_results,
-        "improvement_over_baseline": float(tuned_macro - baseline_results.get("logistic_regression", 0.0)),
+        "fold_scores": [{"fold": i + 1, "macro_f1": score} for i, score in enumerate(fold_scores)],
+        "raw_oof_macro_f1": float(raw_oof_macro_f1),
+        "tuned_oof_macro_f1": float(tuned_oof_macro_f1),
+        "f1_improvement": float(tuned_oof_macro_f1 - raw_oof_macro_f1),
         "classes": classes.tolist(),
-        "thresholds": thresholds,
+        "threshold_multipliers": threshold_multipliers,
         "model_path": str(saved_paths["model"]),
-        "vectorizer_path": str(VECTORIZER_PATH),
     }
     
-    # Save training summary
     save_training_summary(result, f"{MODEL_NAME}_training_summary")
     
-    logger.info("Tuned validation macro F1: %.4f", tuned_macro)
-    print(json.dumps(result, indent=2, default=str))
+    print("\n" + "=" * 70)
+    print("AURORAGATE CATBOOST CV SUMMARY (Native text_features)")
+    print("=" * 70)
+    for f in result["fold_scores"]:
+        print(f"Fold {f['fold']} Macro F1: {f['macro_f1']:.4f}")
+    print(f"\nRaw OOF Macro F1:   {raw_oof_macro_f1:.4f}")
+    print(f"Tuned OOF Macro F1: {tuned_oof_macro_f1:.4f}")
+    print(f"CV Macro F1 Gain:   +{tuned_oof_macro_f1 - raw_oof_macro_f1:.4f}")
+    print("=" * 70)
+    
     return result
 
 

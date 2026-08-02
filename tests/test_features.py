@@ -22,6 +22,7 @@ def test_engineer_features_basic():
     # Check that expected columns are created
     expected_columns = [
         'store_name',
+        'store_name_target_enc',
         'store_frequency',
         'is_recurring',
         'is_round_amount',
